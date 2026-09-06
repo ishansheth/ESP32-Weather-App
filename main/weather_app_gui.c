@@ -8,8 +8,12 @@
  // LVGL includes
  #include "core/lv_obj.h"
  #include "display/lv_display.h"
-#include "freertos/idf_additions.h"
-#include "freertos/projdefs.h"
+ #include "esp_err.h"
+ #include "freertos/idf_additions.h"
+ #include "freertos/projdefs.h"
+#include "misc/lv_event.h"
+ #include "misc/lv_timer_private.h"
+ #include "nvs.h"
  #include "widgets/button/lv_button.h"
  #include "widgets/label/lv_label.h"
  #include "widgets/table/lv_table.h"
@@ -21,6 +25,7 @@
  #include "others/observer/lv_observer.h"
  #include "widgets/checkbox/lv_checkbox.h"
  #include "widgets/dropdown/lv_dropdown.h"
+ #include "widgets/msgbox/lv_msgbox.h"
 
  // esp/wifi stack includes
  #include "esp_wifi_types_generic.h"
@@ -29,6 +34,7 @@
  #include "esp_netif.h"
  #include "esp_event.h"
  #include "esp_http_client.h"
+ #include "esp_crt_bundle.h"
  #include "esp_task_wdt.h"
 
  // generic includes
@@ -66,6 +72,60 @@ static lv_obj_t* rescan_btn_label;
 static lv_obj_t* password_textarea;
 static lv_obj_t* password_keyboard;
 
+static const char * const password_keyboard_lower_map[] = {
+	"1#", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", LV_SYMBOL_BACKSPACE, "\n",
+	"ABC", "a", "s", "d", "f", "g", "h", "j", "k", "l", LV_SYMBOL_NEW_LINE, "\n",
+	"_", "-", "z", "x", "c", "v", "b", "n", "m", ".", ",", ":", "\n",
+	LV_SYMBOL_CLOSE, LV_SYMBOL_LEFT, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK, ""
+};
+
+static const lv_buttonmatrix_ctrl_t password_keyboard_lower_ctrl_map[] = {
+	LV_KEYBOARD_CTRL_BUTTON_FLAGS | 5,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 4,
+	LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+	LV_KEYBOARD_CTRL_BUTTON_FLAGS | 6,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3,
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3, 
+	LV_BUTTONMATRIX_CTRL_POPOVER | 3,
+	LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+	LV_BUTTONMATRIX_CTRL_WIDTH_4, 
+	LV_BUTTONMATRIX_CTRL_WIDTH_4,
+	LV_BUTTONMATRIX_CTRL_WIDTH_4, 
+	LV_BUTTONMATRIX_CTRL_WIDTH_4,
+	LV_BUTTONMATRIX_CTRL_WIDTH_4, 
+	LV_BUTTONMATRIX_CTRL_WIDTH_4,
+	LV_BUTTONMATRIX_CTRL_WIDTH_4, 
+	LV_BUTTONMATRIX_CTRL_WIDTH_4,
+	LV_BUTTONMATRIX_CTRL_WIDTH_4, 
+	LV_BUTTONMATRIX_CTRL_WIDTH_4,
+	LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
+	LV_BUTTONMATRIX_CTRL_CHECKED | 2,
+	6,
+	LV_BUTTONMATRIX_CTRL_CHECKED | 2,
+	LV_KEYBOARD_CTRL_BUTTON_FLAGS | LV_BUTTONMATRIX_CTRL_WIDTH_4 | 2,
+	LV_BUTTONMATRIX_CTRL_WIDTH_3,
+	LV_BUTTONMATRIX_CTRL_WIDTH_5,
+	LV_BUTTONMATRIX_CTRL_WIDTH_3,
+	LV_BUTTONMATRIX_CTRL_WIDTH_4,
+	
+};
+
 // weather info screen widgets
 
 LV_IMAGE_DECLARE(image_weather_sun);
@@ -100,6 +160,8 @@ static lv_obj_t * connecting_wifi_label;
 
 // settings screen widgets
 static lv_obj_t * close_settings_button;
+static lv_obj_t * reconnect_button;
+static lv_obj_t * reconnect_btn_label;
 
 static lv_obj_t* city_select_label;
 static lv_obj_t* temperature_unit_label;
@@ -109,13 +171,17 @@ static lv_subject_t current_city_index;
 static lv_obj_t* celcius_cb;
 static lv_obj_t* farenheit_cb;
 static lv_obj_t* close_settings_label;
+static lv_obj_t* wifi_connected_msgbox;
 
 // constants
-uint8_t number_of_ap = 10;
+const unsigned int number_of_ap = 10;
+
 static char update_time_location[30] = {0};
 
 static char input_wifi_password[64];
 static char input_wifi_station[64];
+static char saved_wifi_station_password[64];
+
 static char meteo_url_buffer[256];
 static uint8_t total_response_buffer[MAX_RESPONSE_SIZE];
 
@@ -124,7 +190,7 @@ char current_time[20] = {0};
 char temperature_str[9]= {0};
 char humidity_str[8]= {0};
 char windspeed_str[15]= {0};
-char weather_description[20] = {0};
+char weather_description[30] = {0};
 int is_day;
 int weather_code;
 int humidity;
@@ -137,10 +203,10 @@ char gui_current_time[20] = {0};
 char gui_temperature_str[9] = {0};
 char gui_humidity_str[8]= {0};
 char gui_windspeed_str[15]= {0};
-char gui_weather_description[20]= {0};
+char gui_weather_description[30]= {0};
 
 
-static EventGroupHandle_t wifi_event_group;
+extern EventGroupHandle_t wifi_event_group;
 
 static const char wifi_tag[] = "[WIFI Connect]";
 static const char weather_station_tag[] = "[Weather Data]";
@@ -151,7 +217,7 @@ unsigned int wifi_retry = 0;
 static unsigned int total_reponse_len = 0;
 
 
-static const char* meteo_url = "http://api.open-meteo.com/v1/forecast";
+static const char* meteo_url = "https://api.open-meteo.com/v1/forecast";
 static const char* current_weather_data_query_fields = "current=temperature_2m,wind_speed_10m,precipitation,rain,weather_code,relative_humidity_2m,is_day";
 static const char* hourly_weather_forecast_fields = "hourly=temperature_2m,wind_speed_10m,precipitation,rain,weather_code,relative_humidity_2m,is_day";
 const char degree_symbol_c[] = "\u00B0C";
@@ -168,10 +234,11 @@ static const char* const temp_farenheit_param = "temperature_unit=fahrenheit";
 static const char* current_city = location_munich;
 static const char* current_location = munich_latitude_longitude;
 
+extern nvs_handle_t storage_handle;
+
 SemaphoreHandle_t triggerWifiConnect;
 SemaphoreHandle_t weatherDataReadySemaphore;
 SemaphoreHandle_t wifiReadySemaphore;
-
 SemaphoreHandle_t weatherdataMutex;
 
 esp_err_t _http_event_handler(esp_http_client_event_t *evt);
@@ -180,14 +247,51 @@ static lwjson_token_t tokens[128];
 static lwjson_t lwjson;
 bool settings_screen = false;	
 bool weather_info_active = false;
+bool wifi_open = false;
 
 // forward declaration
-static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 static void get_weather_description(int code);
 void build_meteo_weather_url();
+void start_weather_data_update();
+
+extern esp_event_handler_instance_t wifi_handler_event_instance;
+extern esp_event_handler_instance_t got_ip_event_instance;
+
 
 // event callbacks
+
+void reconnect_to_sta(lv_event_t * e)
+{
+	esp_wifi_stop();
+	wifi_open = false;
+	lv_screen_load_anim(aplist_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);	
+}
+
+static void close_wifi_connected_message(lv_timer_t *timer)
+{
+	lv_obj_t *message_box = timer->user_data;
+	lv_timer_delete(timer);
+	if(message_box != NULL) {
+		lv_msgbox_close(message_box);
+	}
+	wifi_connected_msgbox = NULL;
+}
+
+static void show_wifi_status_message(char* message, lv_obj_t* parent)
+{
+	if(wifi_connected_msgbox != NULL) {
+		lv_msgbox_close(wifi_connected_msgbox);
+	}
+
+	wifi_connected_msgbox = lv_msgbox_create(parent);
+	lv_msgbox_add_title(wifi_connected_msgbox, "Wi-Fi connected");
+	lv_msgbox_add_text(wifi_connected_msgbox, message);
+	lv_obj_set_width(wifi_connected_msgbox, 210);
+	lv_timer_create(close_wifi_connected_message, 3000, wifi_connected_msgbox);
+}
+
 void connect_to_station(lv_event_t * e)
 {
 	lv_obj_t * obj = lv_event_get_target_obj(e);
@@ -197,9 +301,7 @@ void connect_to_station(lv_event_t * e)
 	const char* wifi_sta_name = lv_table_get_cell_value(obj, row, col);
 	ESP_LOGI(wifi_tag, "selected: %s", wifi_sta_name);
 	snprintf(input_wifi_station,sizeof(input_wifi_station), "%s", wifi_sta_name);	
-	
 	lv_screen_load_anim(wifi_pwd_kb_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);
-
 }
 
 void keyboard_event_cb(lv_event_t *e)
@@ -222,6 +324,11 @@ void keyboard_event_cb(lv_event_t *e)
 			// this is not loading the spinner screen
 			// connect_selected_sta();						
 		 }
+	}
+	else if(code == LV_EVENT_CANCEL)
+	{
+		lv_textarea_set_text(password_textarea, "");
+		lv_screen_load_anim(aplist_screen, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 300, 0, false);
 	}
 	
 }
@@ -290,19 +397,62 @@ void select_city_dropdown_cb(lv_event_t *e)
 	
 }
 
-void scan_wifi_station(lv_event_t * e)
+bool try_connect_from_storage()
+{
+ 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+ 	wifi_config_t wifi_config = {
+ 		.sta = {                       
+ 			.threshold.authmode = WIFI_AUTH_WPA2_PSK,
+ 			.pmf_cfg = {
+ 				.capable=true,
+ 				.required=false
+ 			},
+ 			},
+ 		};
+	
+	memcpy(wifi_config.sta.ssid, input_wifi_station, sizeof(input_wifi_station));
+	memcpy(wifi_config.sta.password, input_wifi_password, sizeof(input_wifi_password));
+	
+ 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&wifi_config));
+	// set connect to wifi event handler	
+	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,ESP_EVENT_ANY_ID,&wifi_event_handler,NULL,&wifi_handler_event_instance));
+
+	// set obtained IP event handler
+	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,IP_EVENT_STA_GOT_IP,&ip_event_handler,NULL,&got_ip_event_instance));
+ 	
+ 	ESP_ERROR_CHECK(esp_wifi_start());
+ 	
+	ESP_LOGI(wifi_tag, "waiting to connect");
+ 	// wait until either WIFI_SUCCESS or WIFI_FAILURE bits are set in the wifi_event_group
+ 	EventBits_t bits = xEventGroupWaitBits(wifi_event_group,WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,pdTRUE,pdFALSE,portMAX_DELAY);
+	if (bits & WIFI_CONNECTED_BIT)
+	{
+		ESP_LOGI(wifi_tag, "connected");
+		
+		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event_instance));
+		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_handler_event_instance));
+		wifi_open = true;
+		show_wifi_status_message("Connection successful", weather_info_screen);
+		start_weather_data_update();
+		return true;		
+	}
+	else if(bits & WIFI_FAIL_BIT)
+	{
+		ESP_LOGI(wifi_tag, "fail to be connected");
+		esp_wifi_stop();
+		return false;
+	}
+	esp_wifi_stop();
+	return false;	
+}
+
+void rescan_ap_cb(lv_event_t * e)
 {
 	uint16_t number = 10;
-	wifi_ap_record_t ap_info[10];
-	uint16_t ap_count = 0;
+	wifi_ap_record_t ap_info[number_of_ap];
 	memset(ap_info, 0, sizeof(ap_info));
 
-	wifi_event_group = xEventGroupCreate();
-
-	esp_netif_create_default_wifi_sta();
-
-	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+	uint16_t ap_count = 0;
 
 	// set wifi mode to wifi station	
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -314,19 +464,73 @@ void scan_wifi_station(lv_event_t * e)
 	ESP_LOGI(wifi_tag, "Max AP number ap_info can hold = %u", number);
 	ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
 	ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
+	esp_wifi_stop();
 
 	ESP_LOGI(wifi_tag, "Total APs scanned = %u, actual AP number ap_info holds = %u", ap_count, number);
+	esp_err_t err;
+	bool result = false;
+	unsigned int ssid_len;
 	for (int i = 0; i < number; i++)
 	{
 		lv_table_set_cell_value(table_wifi_sta, i, 0, (char*)ap_info[i].ssid);
-	    ESP_LOGI(wifi_tag, "SSID \t\t%s", ap_info[i].ssid);
-	    ESP_LOGI(wifi_tag, "RSSI \t\t%d", ap_info[i].rssi);
 	}
-
-	ESP_ERROR_CHECK(esp_wifi_stop());
-
+	lv_screen_load_anim(aplist_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);		
 	
-	lv_screen_load_anim(aplist_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);
+}
+
+void scan_wifi_station(lv_event_t * e)
+{
+	uint16_t number = 10;
+	wifi_ap_record_t ap_info[number_of_ap];
+	memset(ap_info, 0, sizeof(ap_info));
+	
+	uint16_t ap_count = 0;
+
+	// set wifi mode to wifi station	
+	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+	// set the configuration
+	// start the wifi
+	ESP_ERROR_CHECK(esp_wifi_start());
+	esp_wifi_scan_start(NULL, true);
+
+	ESP_LOGI(wifi_tag, "Max AP number ap_info can hold = %u", number);
+	ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+	ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
+	esp_wifi_stop();
+
+	ESP_LOGI(wifi_tag, "Total APs scanned = %u, actual AP number ap_info holds = %u", ap_count, number);
+	esp_err_t err;
+	bool result = false;
+	unsigned int ssid_len;
+	for (int i = 0; i < number; i++)
+	{
+		lv_table_set_cell_value(table_wifi_sta, i, 0, (char*)ap_info[i].ssid);
+	}
+			
+	for (int i = 0; i < number; i++)
+	{	
+		err = nvs_get_str(storage_handle, (char*)&ap_info[i].ssid[0], NULL, &ssid_len);		
+		if(err == ESP_OK)
+		{
+			if(ssid_len <= 64)
+			{
+				err = nvs_get_str(storage_handle, (char*)&ap_info[i].ssid[0], saved_wifi_station_password, &ssid_len);									
+				memcpy(input_wifi_station, ap_info[i].ssid, sizeof(input_wifi_station));
+				memcpy(input_wifi_password, saved_wifi_station_password, sizeof(input_wifi_password));
+				ESP_LOGI(wifi_tag, "Trying to connect to station %s with saved password in storage %s",input_wifi_station, input_wifi_password);
+				result = try_connect_from_storage(); 				
+				if(result)
+				{
+					break;
+				}								
+			}		
+		}
+	}
+	
+	if(!result)
+	{
+		lv_screen_load_anim(aplist_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);		
+	}
 }
 
 void create_welcome_screen()
@@ -361,7 +565,7 @@ void create_ap_list_screen()
 
 	rescan_btn = lv_button_create(aplist_screen);
 	lv_obj_align(rescan_btn, LV_ALIGN_CENTER, 0, 90);
-//	lv_obj_add_event_cb(rescan_btn, weather_setting_btn_cb, LV_EVENT_CLICKED, aplist_screen);
+	lv_obj_add_event_cb(rescan_btn, rescan_ap_cb, LV_EVENT_CLICKED, aplist_screen);
 
 	rescan_btn_label = lv_label_create(rescan_btn);
 	lv_label_set_text(rescan_btn_label, "Rescan");	
@@ -382,10 +586,13 @@ void create_wifi_pwd_screen()
     password_keyboard = lv_keyboard_create(wifi_pwd_kb_screen);
     lv_obj_set_align(password_keyboard, LV_ALIGN_BOTTOM_MID);
     lv_obj_set_size(password_keyboard, lv_pct(100), lv_pct(60));
+	lv_keyboard_set_map(password_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER,
+						password_keyboard_lower_map, password_keyboard_lower_ctrl_map);
     lv_keyboard_set_mode(password_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
 		
 	lv_keyboard_set_textarea(password_keyboard, password_textarea);
 	lv_obj_add_event_cb(password_keyboard, keyboard_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+	lv_obj_add_event_cb(password_keyboard, keyboard_event_cb, LV_EVENT_CANCEL, NULL);
 	
 }
 
@@ -497,6 +704,14 @@ void create_weather_settings_screen()
 	lv_obj_align(farenheit_cb, LV_ALIGN_TOP_LEFT, 10, 130);
 	lv_obj_add_event_cb(farenheit_cb, temperature_unit_event_handler, LV_EVENT_VALUE_CHANGED,NULL);
 
+	reconnect_button = lv_button_create(weather_settings_screen);
+	lv_obj_add_event_cb(reconnect_button, reconnect_to_sta, LV_EVENT_CLICKED,NULL);
+	lv_obj_align(reconnect_button, LV_ALIGN_TOP_LEFT, 10, 160);
+	
+	reconnect_btn_label = lv_label_create(reconnect_button);
+	lv_label_set_text(reconnect_btn_label, "Reconnect");		
+	
+	
 	if(strcmp(current_temp_unit,degree_symbol_c) == 0)
 	{
 		lv_obj_set_state(celcius_cb, LV_STATE_CHECKED, true);		
@@ -528,6 +743,11 @@ void start_weather_app_gui()
 
 void update_weather_labels()
 {	
+	if(wifi_open)
+	{
+		xSemaphoreGive(wifiReadySemaphore);					
+	}
+	
 	if(weather_info_active == false)
 	{
 		return;		
@@ -568,7 +788,7 @@ void update_weather_labels()
 		xSemaphoreGive(weatherdataMutex);
 	}
 
-	get_weather_description(weather_code);
+	get_weather_description(weather_code);	
 	lv_label_set_text(text_label_date, gui_current_date);	
 	lv_label_set_text(text_label_temp, gui_temperature_str);
 	lv_label_set_text(text_label_humidity, gui_humidity_str);
@@ -583,11 +803,19 @@ void start_weather_data_update()
 {
 	weather_info_active = true;
 	lv_screen_load_anim(weather_info_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);
-	xSemaphoreGive(wifiReadySemaphore);			
 }
 
+void save_wifi_sta_data()
+{
+	esp_err_t err = nvs_set_str(storage_handle, input_wifi_station, input_wifi_password);	
+	if(err == ESP_OK)
+	{
+		ESP_LOGI(wifi_tag, "wifi station username password saved in storage");
+	}
+	
+}
 
-static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
 	if(event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
  	{
@@ -598,7 +826,7 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t eve
 	}
 }
 
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
  	if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
  	{
@@ -631,8 +859,6 @@ void connect_selected_sta(void* arg)
 		{	
 		 	ESP_LOGI(wifi_tag,"Connecting to: %s", input_wifi_station);
 		 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-			wifi_event_group = xEventGroupCreate();
-		
 		 	wifi_config_t wifi_config = {
 		 		.sta = {
 		// 			.ssid = "Vodafone-67F4",
@@ -650,13 +876,11 @@ void connect_selected_sta(void* arg)
 			memcpy(wifi_config.sta.password, input_wifi_password, sizeof(input_wifi_password));
 			
 		 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&wifi_config));
-		 	// set connect to wifi event handler	
-		 	esp_event_handler_instance_t wifi_handler_event_instance;
-		 	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,ESP_EVENT_ANY_ID,&wifi_event_handler,NULL,&wifi_handler_event_instance));
-		
-		 	// set obtained IP event handler
-		 	esp_event_handler_instance_t got_ip_event_instance;
-		 	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,IP_EVENT_STA_GOT_IP,&ip_event_handler,NULL,&got_ip_event_instance));
+			// set connect to wifi event handler	
+			ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,ESP_EVENT_ANY_ID,&wifi_event_handler,NULL,&wifi_handler_event_instance));
+
+			// set obtained IP event handler
+			ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,IP_EVENT_STA_GOT_IP,&ip_event_handler,NULL,&got_ip_event_instance));
 		 	
 		 	ESP_ERROR_CHECK(esp_wifi_start());
 		 	
@@ -672,7 +896,10 @@ void connect_selected_sta(void* arg)
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event_instance));
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_handler_event_instance));
 				vEventGroupDelete(wifi_event_group);
+				save_wifi_sta_data();
+				show_wifi_status_message("Connection successful", weather_info_screen);
 				start_weather_data_update();
+				wifi_open = true;
 				
 		 	}
 		 	else if(bits & WIFI_FAIL_BIT)
@@ -681,6 +908,7 @@ void connect_selected_sta(void* arg)
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event_instance));
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_handler_event_instance));
 				vEventGroupDelete(wifi_event_group);
+				show_wifi_status_message("Connection failed", aplist_screen);
 				ESP_ERROR_CHECK(esp_wifi_stop());
 		 		wifi_status = WIFI_FAIL_BIT;	
 				// transition to list of AP screen
@@ -794,6 +1022,7 @@ void initialize_http_client()
 		.method = HTTP_METHOD_GET,
         .url = meteo_url_buffer,
         .event_handler = _http_event_handler,
+		.crt_bundle_attach = esp_crt_bundle_attach,
         .disable_auto_redirect = true,
 	};
 		
@@ -925,9 +1154,7 @@ void parse_weather_data_json(void* arg)
 	{			
 		if(xSemaphoreTake(weatherDataReadySemaphore, portMAX_DELAY) == pdTRUE)
 		{
-			esp_task_wdt_reset();
-
-			if (lwjson_parse(&lwjson, (char*)total_response_buffer) == lwjsonOK) 
+			if (lwjson_parse(&lwjson, (char*)total_response_buffer) == lwjsonOK)
 			{
 			    const lwjson_token_t* t;
 			
@@ -951,8 +1178,7 @@ void parse_weather_data_json(void* arg)
 										
 										snprintf(current_date, date_len+1, "%s", tkn->u.str.token_value);
 										snprintf(current_time, time_len, "%s", tkn->u.str.token_value+date_len+1);
-										ESP_LOGI(weather_station_tag, "%s %s", current_date, current_time);
-										
+										ESP_LOGI(weather_station_tag, "%s %s", current_date, current_time);										
 									}
 								}
 								else if(strncmp(tkn->token_name,"temperature_2m",tkn->token_name_len) == 0)
@@ -1000,12 +1226,8 @@ void parse_weather_data_json(void* arg)
 				else 
 				{
 					ESP_LOGI(weather_station_tag, "Could not parse the current data token in JSON!!");	
-				}
-		
+				}		
 			    lwjson_free(&lwjson);
-				ESP_LOGI(weather_station_tag, "%s, %s, %f, %f, %d, %d, %d", current_date, current_time, temperature, windspeed, weather_code, humidity, is_day);																									
-				
-		
 			}
 			else 
 			{
@@ -1017,7 +1239,6 @@ void parse_weather_data_json(void* arg)
 		else 
 		{
 			esp_task_wdt_reset();
-
 		}		
 		
 	}

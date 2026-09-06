@@ -29,9 +29,11 @@
 #include "driver/uart.h"
 #include "misc/lv_fs.h"
 #include "misc/lv_types.h"
+#include "nvs.h"
 #include "portmacro.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include "esp_wifi.h"
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
 #include "esp_lcd_touch_stmpe610.h"
@@ -85,13 +87,13 @@ static const char *TAG = "example";
 // LVGL library is not thread-safe, this example will call LVGL APIs from different tasks, so use a mutex to protect it
 _lock_t lvgl_api_lock;
 
-extern void set_received_uart_text(uint8_t* data);
-extern void get_weather_data(void *arg);
 extern void initialize_http_client();
 extern void parse_weather_data_json(void* arg);
 extern void init_get_spiffs_info();
 extern void start_weather_app_gui();
 extern void update_weather_labels();
+extern void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+extern void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 
 extern void connect_selected_sta(void* arg);
 extern esp_http_client_handle_t weather_data_http_client;
@@ -100,6 +102,11 @@ extern SemaphoreHandle_t wifiReadySemaphore;
 extern SemaphoreHandle_t weatherDataReadySemaphore;
 extern SemaphoreHandle_t triggerWifiConnect;
 extern SemaphoreHandle_t weatherdataMutex;
+
+EventGroupHandle_t wifi_event_group;
+nvs_handle_t storage_handle;
+esp_event_handler_instance_t wifi_handler_event_instance;
+esp_event_handler_instance_t got_ip_event_instance;
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -201,21 +208,24 @@ static void example_lvgl_port_task(void *arg)
 
 void get_weather_data(void *arg)
 {	
-	if (xSemaphoreTake(wifiReadySemaphore, portMAX_DELAY) == pdTRUE)
-	{		
-		ESP_LOGI(TAG, "got semaphore, wifiready, getting weather data");
-		while(1)
-		{
+	while(1)
+	{
+		if (xSemaphoreTake(wifiReadySemaphore, portMAX_DELAY) == pdTRUE)
+		{		
+			ESP_LOGI(TAG, "got semaphore, wifiready, getting weather data");
+			
 			esp_err_t err = esp_http_client_perform(weather_data_http_client);
 			if (err != ESP_OK) 
 			{
 			    ESP_LOGE(TAG, "HTTP GET request failed");
 			}							
 			vTaskDelay((5000)/portTICK_PERIOD_MS);
-		}					
-	}
-	
+			
+		}
+	}					
 }
+	
+
 
 
 void app_main(void)
@@ -357,6 +367,7 @@ void app_main(void)
 	weatherDataReadySemaphore = xSemaphoreCreateBinary();
 	triggerWifiConnect = xSemaphoreCreateBinary();
 	weatherdataMutex = xSemaphoreCreateMutex();
+	wifi_event_group = xEventGroupCreate();
 
 //	init_uart();
 	lv_lodepng_init();
@@ -365,7 +376,7 @@ void app_main(void)
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	ESP_ERROR_CHECK(esp_netif_init());
 
-
+	
 	esp_err_t ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) 
 	{
@@ -374,6 +385,17 @@ void app_main(void)
 	}
 	ESP_ERROR_CHECK(ret);
 
+	esp_err_t err = nvs_open("storage", NVS_READWRITE, &storage_handle);
+	
+	if(err != ESP_OK)
+	{
+		ESP_LOGW(TAG, "Can not open nv storage");		
+	}
+	esp_netif_create_default_wifi_sta();
+
+	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+	
 	ESP_LOGI(TAG, "Connect to WIFI STA");	
 	xTaskCreate(connect_selected_sta, "Connect to WIFI", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, 1, NULL);
 	

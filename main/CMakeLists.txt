@@ -8,6 +8,7 @@ idf_component_register(SRCS
                        		esp_wifi 
                        		nvs_flash 
                        		esp_http_client 
+                        		esp-tls
                        		spiffs)
 
 include(${CMAKE_CURRENT_LIST_DIR}/lwjson/library.cmake)
