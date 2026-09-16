@@ -11,7 +11,7 @@
  #include "esp_err.h"
  #include "freertos/idf_additions.h"
  #include "freertos/projdefs.h"
-#include "misc/lv_event.h"
+ #include "misc/lv_event.h"
  #include "misc/lv_timer_private.h"
  #include "nvs.h"
  #include "widgets/button/lv_button.h"
@@ -54,8 +54,8 @@
 static lv_obj_t* welcome_screen;
 static lv_obj_t* aplist_screen;
 static lv_obj_t* wifi_pwd_kb_screen;
-static lv_obj_t* wifi_connect_process;
-static lv_obj_t* weather_info_screen;
+lv_obj_t* processing_screen;
+lv_obj_t* weather_info_screen;
 static lv_obj_t* weather_settings_screen;
 
 // welcome screen widgets
@@ -155,8 +155,8 @@ static lv_obj_t* wifi_connected_label;
 static lv_obj_t* error_occurred_label;
 
 // wifi connection in process screen widgets
-static lv_obj_t * connecting_wifi_spinner;
-static lv_obj_t * connecting_wifi_label;
+static lv_obj_t * processing_spinner;
+lv_obj_t * processing_label;
 
 // settings screen widgets
 static lv_obj_t * close_settings_button;
@@ -172,6 +172,8 @@ static lv_obj_t* celcius_cb;
 static lv_obj_t* farenheit_cb;
 static lv_obj_t* close_settings_label;
 static lv_obj_t* wifi_connected_msgbox;
+static lv_obj_t* update_fw_button;
+static lv_obj_t* update_fw_button_label;
 
 // constants
 const unsigned int number_of_ap = 10;
@@ -182,7 +184,7 @@ static char input_wifi_password[64];
 static char input_wifi_station[64];
 static char saved_wifi_station_password[64];
 
-static char meteo_url_buffer[256];
+static char meteo_url_buffer[356];
 static uint8_t total_response_buffer[MAX_RESPONSE_SIZE];
 
 char current_date[20] = {0};
@@ -231,8 +233,13 @@ static const char* const mumbai_latitude_longitude = "latitude=19.0760&longitude
 static const char* const paris_latitude_longitude = "latitude=48.8566&longitude=2.3522";
 static const char* const temp_farenheit_param = "temperature_unit=fahrenheit";
 
+static const char* const munich_timezone = "timezone=Europe%2FBerlin";
+static const char* const paris_timezone = "timezone=Europe%2FParis";
+static const char* const mumbai_timezone = "timezone=Asia%2FKolkata";
+
 static const char* current_city = location_munich;
 static const char* current_location = munich_latitude_longitude;
+static const char* current_timezone = munich_timezone;
 
 extern nvs_handle_t storage_handle;
 
@@ -255,6 +262,8 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
 static void get_weather_description(int code);
 void build_meteo_weather_url();
 void start_weather_data_update();
+void app_update_button_cb(lv_event_t * e);
+
 
 extern esp_event_handler_instance_t wifi_handler_event_instance;
 extern esp_event_handler_instance_t got_ip_event_instance;
@@ -279,14 +288,14 @@ static void close_wifi_connected_message(lv_timer_t *timer)
 	wifi_connected_msgbox = NULL;
 }
 
-static void show_wifi_status_message(char* message, lv_obj_t* parent)
+void show_status_messagebox(char* message, lv_obj_t* parent)
 {
 	if(wifi_connected_msgbox != NULL) {
 		lv_msgbox_close(wifi_connected_msgbox);
 	}
 
 	wifi_connected_msgbox = lv_msgbox_create(parent);
-	lv_msgbox_add_title(wifi_connected_msgbox, "Wi-Fi connected");
+//	lv_msgbox_add_title(wifi_connected_msgbox, "Wi-Fi connected");
 	lv_msgbox_add_text(wifi_connected_msgbox, message);
 	lv_obj_set_width(wifi_connected_msgbox, 210);
 	lv_timer_create(close_wifi_connected_message, 3000, wifi_connected_msgbox);
@@ -318,8 +327,9 @@ void keyboard_event_cb(lv_event_t *e)
 		 {
 			ESP_LOGI(wifi_tag, "Current input: %s", text);	
 			snprintf(input_wifi_password, sizeof(input_wifi_password), "%s", text);		
-
-			lv_screen_load_anim(wifi_connect_process, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);
+	
+			lv_label_set_text(processing_label, "Connecting....");
+			lv_screen_load_anim(processing_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300,0,false);
 			xSemaphoreGive(triggerWifiConnect);
 			// this is not loading the spinner screen
 			// connect_selected_sta();						
@@ -379,6 +389,7 @@ void select_city_dropdown_cb(lv_event_t *e)
 	if(strcmp(buf,"Munich") == 0)
 	{
 		current_location = munich_latitude_longitude;		
+		current_timezone = munich_timezone;
 		current_city = location_munich;
 		selected_option_index = 0;
 	}
@@ -386,13 +397,15 @@ void select_city_dropdown_cb(lv_event_t *e)
 	{
 		current_location = mumbai_latitude_longitude;				
 		current_city = location_mumbai;		
+		current_timezone = mumbai_timezone;
 		selected_option_index = 1;
 	}
 	else if(strcmp(buf,"Paris") == 0)
 	{
 		current_location = paris_latitude_longitude;						
 		current_city = location_paris;		
-		selected_option_index = 2;
+		current_timezone = paris_timezone;
+		selected_option_index = 2;		
 	}	
 	
 }
@@ -432,7 +445,7 @@ bool try_connect_from_storage()
 		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event_instance));
 		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_handler_event_instance));
 		wifi_open = true;
-		show_wifi_status_message("Connection successful", weather_info_screen);
+		show_status_messagebox("Connection successful", weather_info_screen);
 		start_weather_data_update();
 		return true;		
 	}
@@ -652,18 +665,17 @@ void create_weather_info_screen()
 	lv_obj_align(wind_image, LV_ALIGN_CENTER, 30, 30);	
 }
 
-void create_wifi_connect_process_screen()
+void create_process_spinner_screen()
 {
-	wifi_connect_process = lv_obj_create(NULL);	
+	processing_screen = lv_obj_create(NULL);	
 	
-	connecting_wifi_spinner = lv_spinner_create(wifi_connect_process);
-	lv_obj_set_size(connecting_wifi_spinner, 80, 80);
-	lv_spinner_set_anim_params(connecting_wifi_spinner, 1000, 270);
-	lv_obj_align(connecting_wifi_spinner, LV_ALIGN_CENTER, 0, 0);
+	processing_spinner = lv_spinner_create(processing_screen);
+	lv_obj_set_size(processing_spinner, 80, 80);
+	lv_spinner_set_anim_params(processing_spinner, 1000, 270);
+	lv_obj_align(processing_spinner, LV_ALIGN_CENTER, 0, 0);
 
-	connecting_wifi_label = lv_label_create(wifi_connect_process);
-	lv_obj_align(connecting_wifi_label, LV_ALIGN_CENTER, 0, -60);
-	lv_label_set_text(connecting_wifi_label, "Connecting...");		
+	processing_label = lv_label_create(processing_screen);
+	lv_obj_align(processing_label, LV_ALIGN_CENTER, 0, -60);
 }
 
 void create_weather_settings_screen()
@@ -711,7 +723,13 @@ void create_weather_settings_screen()
 	reconnect_btn_label = lv_label_create(reconnect_button);
 	lv_label_set_text(reconnect_btn_label, "Reconnect");		
 	
-	
+	update_fw_button = lv_button_create(weather_settings_screen);
+	lv_obj_add_event_cb(update_fw_button, app_update_button_cb, LV_EVENT_CLICKED,NULL);
+	lv_obj_align(update_fw_button, LV_ALIGN_TOP_LEFT, 150, 10);
+
+	update_fw_button_label = lv_label_create(update_fw_button);
+	lv_label_set_text(update_fw_button_label, "Update");		
+		
 	if(strcmp(current_temp_unit,degree_symbol_c) == 0)
 	{
 		lv_obj_set_state(celcius_cb, LV_STATE_CHECKED, true);		
@@ -732,7 +750,7 @@ void build_gui()
 	create_wifi_pwd_screen();
 	create_weather_info_screen();
 	create_weather_settings_screen();
-	create_wifi_connect_process_screen();
+	create_process_spinner_screen();
 }
 
 void start_weather_app_gui()
@@ -740,6 +758,7 @@ void start_weather_app_gui()
 	build_gui();
 	lv_screen_load(welcome_screen);
 }
+
 
 void update_weather_labels()
 {	
@@ -897,7 +916,7 @@ void connect_selected_sta(void* arg)
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_handler_event_instance));
 				vEventGroupDelete(wifi_event_group);
 				save_wifi_sta_data();
-				show_wifi_status_message("Connection successful", weather_info_screen);
+				show_status_messagebox("Connection successful", weather_info_screen);
 				start_weather_data_update();
 				wifi_open = true;
 				
@@ -908,7 +927,7 @@ void connect_selected_sta(void* arg)
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event_instance));
 				ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_handler_event_instance));
 				vEventGroupDelete(wifi_event_group);
-				show_wifi_status_message("Connection failed", aplist_screen);
+				show_status_messagebox("Connection failed", aplist_screen);
 				ESP_ERROR_CHECK(esp_wifi_stop());
 		 		wifi_status = WIFI_FAIL_BIT;	
 				// transition to list of AP screen
@@ -950,7 +969,13 @@ void build_meteo_weather_url()
 		
 	snprintf(meteo_url_buffer + offset, sizeof(meteo_url_buffer), "%s", current_weather_data_query_fields);
 	offset += strlen(current_weather_data_query_fields);					
+
+	snprintf(meteo_url_buffer + offset, sizeof(meteo_url_buffer), "&");
+	offset += 1;
 	
+	snprintf(meteo_url_buffer + offset, sizeof(meteo_url_buffer), "%s", current_timezone);
+	offset += strlen(current_timezone);					
+			
 	if(strcmp(current_temp_unit,degree_symbol_f) == 0)
 	{
 		snprintf(meteo_url_buffer + offset, sizeof(meteo_url_buffer), "&");
@@ -959,6 +984,9 @@ void build_meteo_weather_url()
 		snprintf(meteo_url_buffer + offset, sizeof(meteo_url_buffer), "%s", temp_farenheit_param);
 		offset += strlen(temp_farenheit_param);				
 	}	
+	
+	ESP_LOGI(weather_station_tag,"Built URL: %s", meteo_url_buffer);	
+	
 	
 }
 

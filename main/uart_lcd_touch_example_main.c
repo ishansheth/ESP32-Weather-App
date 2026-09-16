@@ -94,6 +94,10 @@ extern void start_weather_app_gui();
 extern void update_weather_labels();
 extern void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 extern void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+extern void initialize_ota_update_client();
+extern void ota_update_task(void* parameter);
+extern void update_ota_download_precentage_label();
+extern void check_ota_update_state();
 
 extern void connect_selected_sta(void* arg);
 extern esp_http_client_handle_t weather_data_http_client;
@@ -102,6 +106,9 @@ extern SemaphoreHandle_t wifiReadySemaphore;
 extern SemaphoreHandle_t weatherDataReadySemaphore;
 extern SemaphoreHandle_t triggerWifiConnect;
 extern SemaphoreHandle_t weatherdataMutex;
+extern SemaphoreHandle_t triggerOtaUpdate;
+extern SemaphoreHandle_t updateOTADownloadProgress;
+extern SemaphoreHandle_t updateOTAResultFlag;
 
 EventGroupHandle_t wifi_event_group;
 nvs_handle_t storage_handle;
@@ -195,6 +202,8 @@ static void example_lvgl_port_task(void *arg)
         _lock_acquire(&lvgl_api_lock);
         time_till_next_ms = lv_timer_handler();
 		update_weather_labels();
+		update_ota_download_precentage_label();
+		check_ota_update_state();
         _lock_release(&lvgl_api_lock);
 		
 		vTaskDelay(pdMS_TO_TICKS(100));
@@ -366,13 +375,16 @@ void app_main(void)
 	wifiReadySemaphore = xSemaphoreCreateBinary();
 	weatherDataReadySemaphore = xSemaphoreCreateBinary();
 	triggerWifiConnect = xSemaphoreCreateBinary();
+	triggerOtaUpdate = xSemaphoreCreateBinary();
+	updateOTADownloadProgress = xSemaphoreCreateMutex();
+	updateOTAResultFlag = xSemaphoreCreateMutex();
 	weatherdataMutex = xSemaphoreCreateMutex();
 	wifi_event_group = xEventGroupCreate();
-
+	
 //	init_uart();
-	lv_lodepng_init();
 //	init_get_spiffs_info();
 	initialize_http_client();
+	initialize_ota_update_client();
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	ESP_ERROR_CHECK(esp_netif_init());
 
@@ -407,7 +419,9 @@ void app_main(void)
 
 	ESP_LOGI(TAG, "Create Parse weather data task");
 	xTaskCreate(parse_weather_data_json, "Update GUI with Weather data task", EXAMPLE_LVGL_TASK_STACK_SIZE*4, NULL, 2, NULL);
-	
+
+	ESP_LOGI(TAG, "Create OTA update task");
+	xTaskCreate(ota_update_task, "OTA update task", EXAMPLE_LVGL_TASK_STACK_SIZE*4, NULL, 2, NULL);		
 	
     // Lock the mutex due to the LVGL APIs are not thread-safe
 	
